@@ -1,11 +1,12 @@
 import logging
+import io
 import time
 import urllib.request as urlrequest
 import urllib.error as urlerror
 import urllib.parse as urlparse
 import json, csv
 import os, base64
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import ciso8601
 from coralogix.handlers import CoralogixLogger
 import boto3
@@ -113,18 +114,18 @@ def lambda_handler(event, context):
     db_response = db_table.scan()
     # get last_update value
     if 'Items' in db_response and len(db_response['Items']) > 0:
-        last_update = [x for x in db_response['Items'] if x.id == 0][0].lastUpdate
+        last_update = [x for x in db_response['Items'] if x['id'] == '0'][0]['lastUpdated']
     else:
-        last_update = datetime.today(timezone.utc).isoformat().replace('+00:00', 'z')
+        last_update = datetime.utcnow().date().isoformat() + 'T00:00:00.000000z'
     # build SF domain
     if SANDBOX_ENV in TRUE_VALUES:
-        domain = 'https://%s.my.salesforce.com' % HOST
+        domain = '%s.sandbox.my.salesforce.com' % HOST
     else:
-        domain = 'https://%s.sandbox.my.salesforce.com' % HOST
+        domain = '%s.my.salesforce.com' % HOST
     records = get_records_list(access_token, domain, last_update)
     if records == None:
         return {
-        'statusCode': 200,
+        'statusCode': 400,
         'body': json.dumps({
         'message': 'Event-log puller lambda Failure could not retrieve records - Endpoint: %s' % HOST,
         }),
@@ -133,30 +134,32 @@ def lambda_handler(event, context):
     early_end = False
     if len(records) == 0:
         # no records from SF, modify last update to today.
+        # use timedelta to make sure no record lost in the meantime
+        new_last_update = datetime.now(timezone.utc) - timedelta(minutes=2)
         db_table.put_item(Item={
-        "id": 0,
-        "lastUpdated": datetime.today(timezone.utc).isoformat().replace('+00:00', 'z')
+        "id": "0",
+        "lastUpdated": new_last_update.isoformat().replace('+00:00', 'z')
         })
         # check if any records needs to be deleted
-        new_last_update = ciso8601.parse_datetime(datetime.today(timezone.utc).isoformat())
         for record in db_response['Items']:
-            if ciso8601.parse_datetime(record.lastUpdated) < new_last_update:
-                db_table.delete_item(Key={
-                    "id": record.id
-                })
+            if record['id'] != '0':
+                if ciso8601.parse_datetime(record['lastUpdated']) < new_last_update:
+                    db_table.delete_item(Key={
+                        "id": record['id']
+                    })
     else:
         # setup early_end record index
         early_last_record = len(records) - 1
         # iterate sf_records list
         for i, record in enumerate(records):
-            db_record = [x for x in db_response['Items'] if x.id == record.Id]
+            db_record = [x for x in db_response['Items'] if x['id'] == record['Id']]
             if len(db_record) == 0 :
                 # record not found in db, save it and send logs to coralogix
                 # check for errors
-                if record_logic() is not None:
+                if record_logic(access_token, domain, record) is not None:
                     db_table.put_item(Item={
-                        "id": record.Id,
-                        "lastUpdated": record.LogDate.replace('+0000','z')
+                        "id": record['Id'],
+                        "lastUpdated": record['LogDate'].replace('+0000','z')
                     })
             if context.get_remaining_time_in_millis() < 30000:
                 early_last_record = i
@@ -164,16 +167,16 @@ def lambda_handler(event, context):
                 break
         # save to db the latest date
         last_record = records[early_last_record]
+        new_last_update = ciso8601.parse_datetime(last_record['LogDate'])
         db_table.put_item(Item={
-            "id": 0,
-            "lastUpdated": last_record.LogDate.replace('+0000','z')
+            "id": '0',
+            "lastUpdated": new_last_update.isoformat().replace('+0000','z')
         })
-        new_last_update = ciso8601.parse_datetime(last_record.LogDate)
         # loop on db_records to remove old ones
         for record in db_response['Items']:
-            if ciso8601.parse_datetime(record.lastUpdated) < new_last_update:
+            if ciso8601.parse_datetime(record['lastUpdated']) < new_last_update:
                 db_table.delete_item(Key={
-                    "id": record.id
+                    "id": record['id']
                 })
 
     CoralogixLogger.flush_messages()
@@ -196,11 +199,11 @@ def lambda_handler(event, context):
         }
 
 def get_records_list(access_token, domain, last_update):
-    endpoint = domain + "/services/data/v55.0/query?q=SELECT+Id+,+EventType+,+LogFile+,+LogDate+,+LogFileLength+,Interval+FROM+EventLogFile+WHERE+LogDate+>+%s" % last_update
+    endpoint = 'https://' + domain + "/services/data/v55.0/query?q=SELECT+Id+,+EventType+,+LogFile+,+LogDate+,+LogFileLength+,Interval+FROM+EventLogFile+WHERE+LogDate+>+%s" % last_update
     if EVENT_TYPE != '':
         endpoint += "+AND+EventType+=+'%s'" % EVENT_TYPE
-    endpoint += "+ORDER BY+LogDate+ASC"
-    request = urlrequest.Request(endpoint,method='get')
+    endpoint += "+ORDER+BY+LogDate+ASC"
+    request = urlrequest.Request(endpoint)
     request.add_header('Authorization','Bearer %s' % access_token)
     request.add_header('User-Agent', 'Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:33.0) Gecko/20100101 Firefox/33.0')
     request.add_header('host', domain)
@@ -222,34 +225,28 @@ def get_records_list(access_token, domain, last_update):
         return None
 
 def record_logic(access_token, domain, record):
-    endpoint = domain + "/services/data/v55.0/sobjects/EventLogFile/%s/LogFile" % record.LogFile
-    request = urlrequest.Request(endpoint,method='get')
+    endpoint = 'https://' + domain + record['LogFile']
+    request = urlrequest.Request(endpoint)
     request.add_header('Authorization','Bearer %s' % access_token)
     request.add_header('User-Agent', 'Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:33.0) Gecko/20100101 Firefox/33.0')
     request.add_header('host', domain)
     try:
         response = urlrequest.urlopen(request, timeout=30)
     except urlerror.HTTPError as e:
-        internal_logger.error('Event-log puller lambda Failure could not retrieve logfile - recordId: %s,  Endpoint: %s , error: %s' % (record.Id, domain, e))
+        internal_logger.error('Event-log puller lambda Failure could not retrieve logfile - recordId: %s,  Endpoint: %s , error: %s' % (record['Id'], domain, e))
         return None
     except urlerror.URLError as e:
-        internal_logger.error('Event-log puller lambda Failure could not retrieve logfile - recordId: %s,  Endpoint: %s , error: %s' % (record.Id, domain, e))
+        internal_logger.error('Event-log puller lambda Failure could not retrieve logfile - recordId: %s,  Endpoint: %s , error: %s' % (record['Id'], domain, e))
         return None
     res_body = response.read()
     try:
-        data = {}
-        csvReader = csv.DictReader(res_body.decode('utf-8'))
-        for i,row in enumerate(csvReader):
-            data[i] = row
-        log_sender(data)
+        csvReader = csv.DictReader(io.StringIO(res_body.decode('utf-8')))
+        for row in csvReader:
+            external_logger.info(json.dumps(row))
         return 1
     except:
-        internal_logger.error('Event-log puller lambda Failure could not convert csv file to json - recordId: %s,  Endpoint: %s , error: %s' % (record.Id, domain, e))
+        internal_logger.error('Event-log puller lambda Failure could not convert csv file to json - recordId: %s,  Endpoint: %s , error: %s' % (record['Id'], domain, e))
         return None
-
-def log_sender(data):
-    for row in data:
-        external_logger.info(json.dumps(row))
 
 def get_token():
     form_data = {
@@ -263,8 +260,8 @@ def get_token():
     req_data = req_data.encode('utf-8')
     prefix = 'login'
     if SANDBOX_ENV in TRUE_VALUES:
-        prefix = 'test'
-    auth_host = "https://%s.salesforce.com/services/oauth2/token" % prefix
+        prefix = 'test.'
+    auth_host = "https://%ssalesforce.com/services/oauth2/token" % prefix
     request = urlrequest.Request(auth_host,req_data)
     # adding charset parameter to the Content-Type header.
     request.add_header('Content-Type', 'application/x-www-form-urlencoded;charset=utf-8')
@@ -300,3 +297,4 @@ def get_token():
             'message': 'Event-log puller lambda Failure - Error while getting token, failed to get access_token from request - %s ' % json.dumps(JSON_object),
         }),
         }
+        
