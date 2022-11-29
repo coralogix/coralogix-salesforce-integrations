@@ -5,12 +5,11 @@ import urllib.request as urlrequest
 import urllib.error as urlerror
 import urllib.parse as urlparse
 import json, csv
-import os, base64
-from datetime import datetime, timezone, timedelta
+import os
+from datetime import datetime, timezone
 import ciso8601
 from coralogix.handlers import CoralogixLogger
 import boto3
-from boto3.dynamodb.conditions import Key
 
 # Create internal logger and logs logger.
 internal_logger = logging.getLogger('Internal Logger')
@@ -37,6 +36,7 @@ ALLOWED_EVENT_TYPE = ['API', 'ApexCallout', 'ApexExecution', 'AsyncReportRun', '
   'MetadataApiOperation', 'NamedCredential', 'OneCommerceUsage', 'PackageInstall', 'QueuedExecution', 'PlatformEncryption', 'Report', 'RestApi', 'Sites', 'SearchClick', 'Search', 'TimeBasedWorkflow', 'URI', 'VisualforceRequest', 'WaveChange', 'WaveInteraction', 'WavePerformance']
 def lambda_handler(event, context):
     internal_logger.info('Event-log puller lambda - init')
+    timestart = datetime.now(timezone.utc).isoformat().replace('+00:00', 'z')
     # Coralogix variables check
     if PRIVATE_KEY == '':
         internal_logger.error('Event-log puller lambda Failure - coralogix private key not found')
@@ -116,7 +116,7 @@ def lambda_handler(event, context):
     if 'Items' in db_response and len(db_response['Items']) > 0:
         last_update = [x for x in db_response['Items'] if x['id'] == '0'][0]['lastUpdated']
     else:
-        last_update = datetime.utcnow().date().isoformat() + 'T00:00:00.000000z'
+        last_update = timestart
     # build SF domain
     if SANDBOX_ENV in TRUE_VALUES:
         domain = '%s.sandbox.my.salesforce.com' % HOST
@@ -133,56 +133,68 @@ def lambda_handler(event, context):
     # setup lambda timout flag
     early_end = False
     if len(records) == 0:
-        # no records from SF, modify last update to today.
-        # use timedelta to make sure no record lost in the meantime
-        new_last_update = datetime.now(timezone.utc) - timedelta(minutes=2)
+        # no records from SF, modify last update to timestart.
         db_table.put_item(Item={
-        "id": "0",
-        "lastUpdated": new_last_update.isoformat().replace('+00:00', 'z')
+        'id': '0',
+        'lastUpdated': timestart
         })
+        new_last_update = ciso8601.parse_datetime(timestart)
         # check if any records needs to be deleted
+        items_to_delete = []
         for record in db_response['Items']:
             if record['id'] != '0':
                 if ciso8601.parse_datetime(record['lastUpdated']) < new_last_update:
-                    db_table.delete_item(Key={
-                        "id": record['id']
-                    })
+                    items_to_delete.append(record['id'])
+        with db_table.batch_writer() as batch:
+            for item in items_to_delete:
+                batch.delete_item(Key={
+                    'id': item
+                })
     else:
         # setup early_end record index
         early_last_record = len(records) - 1
+        items_to_add = []
         # iterate sf_records list
         for i, record in enumerate(records):
             db_record = [x for x in db_response['Items'] if x['id'] == record['Id']]
             if len(db_record) == 0 :
-                # record not found in db, save it and send logs to coralogix
-                # check for errors
+                # record not found in db, send logs to coralogix and save it if no errors
                 if record_logic(access_token, domain, record) is not None:
-                    db_table.put_item(Item={
-                        "id": record['Id'],
-                        "lastUpdated": record['LogDate'].replace('+0000','z')
-                    })
+                    items_to_add.append(record)
             if context.get_remaining_time_in_millis() < 30000:
                 early_last_record = i
                 early_end = True
                 break
-        # save to db the latest date
-        last_record = records[early_last_record]
-        new_last_update = ciso8601.parse_datetime(last_record['LogDate'])
-        db_table.put_item(Item={
-            "id": '0',
-            "lastUpdated": new_last_update.isoformat().replace('+0000','z')
-        })
-        # loop on db_records to remove old ones
+        if early_end == True:
+            last_record = records[early_last_record]
+            new_last_update = ciso8601.parse_datetime(last_record['LogDate'])
+            items_to_add.append({'Id': '0','LogDate': new_last_update.isoformat().replace('+0000','z')})
+        else:
+            new_last_update = ciso8601.parse_datetime(timestart)
+            items_to_add.append({'Id':'0','LogDate':timestart})
+        # save to db all records
+        with db_table.batch_writer() as batch:
+            for item in items_to_add:
+                batch.put_item(Item={
+                    'id': item['Id'],
+                    'lastUpdated': item['LogDate'].replace('+0000','z') # replace will only catch 'real' record logDate
+                })
+        # check if any records needs to be deleted
+        items_to_delete = []
         for record in db_response['Items']:
-            if ciso8601.parse_datetime(record['lastUpdated']) < new_last_update:
-                db_table.delete_item(Key={
-                    "id": record['id']
+            if record['id'] != '0':
+                if ciso8601.parse_datetime(record['lastUpdated']) < new_last_update:
+                    items_to_delete.append(record['id'])
+        with db_table.batch_writer() as batch:
+            for item in items_to_delete:
+                batch.delete_item(Key={
+                    "id": item
                 })
 
     CoralogixLogger.flush_messages()
     time.sleep(5) # for now until fixing python sdk not fully flushing within aws lambda
     if early_end: # if the lambda had to stop before finishing due to time-out
-        internal_logger.warn("Event-log puller lambda - Not enough time to send all logs, waiting for next invocation")
+        internal_logger.info("Event-log puller lambda - Not enough time to send all logs, waiting for next invocation")
         return {
         "statusCode": 200,
         "body": json.dumps({
@@ -199,7 +211,7 @@ def lambda_handler(event, context):
         }
 
 def get_records_list(access_token, domain, last_update):
-    endpoint = 'https://' + domain + "/services/data/v55.0/query?q=SELECT+Id+,+EventType+,+LogFile+,+LogDate+,+LogFileLength+,Interval+FROM+EventLogFile+WHERE+LogDate+>+%s" % last_update
+    endpoint = 'https://' + domain + "/services/data/v55.0/query?q=SELECT+Id+,+EventType+,+LogFile+,+LogDate+,+LogFileLength+,Interval+FROM+EventLogFile+WHERE+LogDate+>=+%s" % last_update
     if EVENT_TYPE != '':
         endpoint += "+AND+EventType+=+'%s'" % EVENT_TYPE
     endpoint += "+ORDER+BY+LogDate+ASC"
