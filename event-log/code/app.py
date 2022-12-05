@@ -226,8 +226,8 @@ def get_records_list(access_token, domain, last_update):
         JSON_object = json.loads(res_body.decode('utf-8'))
         records = JSON_object['records']
         return records
-    except (ValueError,KeyError):
-        internal_logger.error('Event-log puller lambda Failure - could not retrieve records, failed to get records from response - %s ' % json.dumps(JSON_object))
+    except (ValueError,KeyError) as e:
+        internal_logger.error('Event-log puller lambda Failure - could not retrieve records, failed to get records from response - %s ' % e)
         return None
 
 def record_logic(access_token, domain, record):
@@ -305,11 +305,11 @@ def get_token():
         JSON_object = json.loads(res_body.decode('utf-8'))
         access_token = JSON_object['access_token']
         return access_token
-    except (ValueError,KeyError):
-        internal_logger.error('Event-log puller lambda Failure - Error while getting token, failed to get access_token from response - %s ' % json.dumps(JSON_object))
+    except (ValueError,KeyError) as e:
+        internal_logger.error('Event-log puller lambda Failure - Error while getting token, failed to get access_token from response - %s ' % e)
         return {
            'statusCode': 400,
             'body': json.dumps({
-            'message': 'Event-log puller lambda Failure - Error while getting token, failed to get access_token from request - %s ' % json.dumps(JSON_object),
+            'message': 'Event-log puller lambda Failure - Error while getting token, failed to get access_token from request - %s ' % e,
         }),
         }
