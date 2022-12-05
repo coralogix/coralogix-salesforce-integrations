@@ -39,7 +39,7 @@ ALLOWED_EVENT_TYPE = ['API', 'ApexCallout', 'ApexExecution', 'AsyncReportRun', '
 def lambda_handler(event, context):
     internal_logger.info('Event-log puller lambda - init')
     # Coralogix variables check
-    if PRIVATE_KEY == '':
+    if PRIVATE_KEY is None or PRIVATE_KEY == '':
         internal_logger.error('Event-log puller lambda Failure - coralogix private key not found')
         return {
             'statusCode': 400,
@@ -47,7 +47,7 @@ def lambda_handler(event, context):
             'message': 'Event-log puller lambda Failure - coralogix private key not found',
             }),
         }
-    if APP_NAME == '' or SUB_SYSTEM == '':
+    if APP_NAME is None or APP_NAME == '' or SUB_SYSTEM is None or SUB_SYSTEM == '':
         internal_logger.error('Event-log puller lambda Failure - coralogix application name and subsystem name not found')
         return {
             'statusCode': 400,
@@ -63,7 +63,7 @@ def lambda_handler(event, context):
     # Add coralogix logger as a handler to the standard Python logger.
     external_logger.addHandler(coralogix_external_handler)
     # Environment variables check
-    if HOST == '':
+    if HOST is None or HOST == '':
         internal_logger.error('Event-log puller lambda Failure - salesforce host not found')
         return {
             'statusCode': 400,
@@ -71,7 +71,7 @@ def lambda_handler(event, context):
             'message': 'Event-log puller lambda Failure - salesforce host not found',
             }),
         }
-    if CLIENT_ID == '' or CLIENT_SECRET == '':
+    if CLIENT_ID is None or CLIENT_ID == '' or CLIENT_SECRET is None or CLIENT_SECRET == '':
         internal_logger.error('Event-log puller lambda Failure - Event-log client_id and client_secret not found')
         return {
             'statusCode': 400,
@@ -79,7 +79,7 @@ def lambda_handler(event, context):
             'message': 'Event-log puller lambda Failure - Event-log client_id and client_secret not found',
             }),
         }
-    if USERNAME == '' or PASSWORD == '':
+    if USERNAME is None or USERNAME == '' or PASSWORD is None or PASSWORD == '':
         internal_logger.error('Event-log puller lambda Failure - Event-log username and password not found')
         return {
             'statusCode': 400,
@@ -87,7 +87,7 @@ def lambda_handler(event, context):
             'message': 'Event-log puller lambda Failure - Event-log username and password not found',
             }),
         }
-    if EVENT_TYPE != '' and EVENT_TYPE not in ALLOWED_EVENT_TYPE :
+    if EVENT_TYPE is None or EVENT_TYPE != '' and EVENT_TYPE not in ALLOWED_EVENT_TYPE :
         internal_logger.error('Event-log puller lambda Failure - event type not found')
         return {
             'statusCode': 400,
@@ -306,10 +306,10 @@ def get_token():
         access_token = JSON_object['access_token']
         return access_token
     except (ValueError,KeyError) as e:
-        internal_logger.error('Event-log puller lambda Failure - Error while getting token, failed to get access_token from response - %s ' % e)
+        internal_logger.error('Event-log puller lambda Failure - Error while getting token, failed to get access_token from response - %s . most likely credentials are incorrect' % e)
         return {
            'statusCode': 400,
             'body': json.dumps({
-            'message': 'Event-log puller lambda Failure - Error while getting token, failed to get access_token from request - %s ' % e,
+            'message': 'Event-log puller lambda Failure - Error while getting token, failed to get access_token from response - %s . most likely credentials are incorrect' % e,
         }),
         }
