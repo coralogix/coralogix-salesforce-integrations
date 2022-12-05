@@ -1,14 +1,14 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
 Description: >
-  Coralgoix Event-log - SAM app to send event logs to Coraloigx
+  Coralgoix Event-log SAM app - send salesforce event logs to Coraloigx
 Metadata:
   AWS::ServerlessRepo::Application:
     Name: Coralogix-event-log
     Description: Get logs from Salesforce event-log and send them to Coralogix.
-    Author: Coralogix
+    Author: Coralogix-test
     SpdxLicenseId: Apache-2.0
-    LicenseUrl: LICENSE
+    LicenseUrl: ../LICENSE
     ReadmeUrl: README.md
     Labels:
       - coralogix
@@ -118,7 +118,7 @@ Parameters:
     AllowedValues:
       - "True"
       - "False"
-    Default: "True"
+    Default: "False"
   SFHost:
     Type: String
     Description: The SF host only without .my.salesforce.com; <SF-HOST>.my.salesforce.com
@@ -177,7 +177,7 @@ Parameters:
     AllowedValues:
       - "True"
       - "False"
-    Default: "True"
+    Default: "False"
 Mappings:
   CoralogixRegionMap:
     Europe:
@@ -231,19 +231,19 @@ Resources:
           DYNAMODB_TABLE:
             Ref: DynamoDB
           SF_SANDBOX_ENV:
-            Ref: OcapiEndpoint
+            Ref: SFSandbox
           SF_HOST:
-            Ref: OcapiUsername
+            Ref: SFHost
           SF_EVENT_TYPE:
-            Ref: OcapiPassword
+            Ref: SFEventType
           SF_CLIENT_ID:
-            Ref: SelectStatement
+            Ref: SFClientId
           SF_CLIENT_SECRET:
-            Ref: SelectStatement
+            Ref: SFClientSecret
           SF_USERNAME:
-            Ref: SelectStatement
+            Ref: SFUsername
           SF_PASSWORD:
-            Ref: SelectStatement
+            Ref: SFPassword
           LOGS_TO_STDOUT:
             Ref: LogsToStdout
       EventInvokeConfig:

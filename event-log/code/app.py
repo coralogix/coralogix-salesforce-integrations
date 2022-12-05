@@ -177,7 +177,7 @@ def lambda_handler(event, context):
                     "id": item
                 })
     CoralogixLogger.flush_messages()
-    # exit only on coralogix logger buffer empty
+    # exit only when the coralogix logger buffer is empty
     # code implementation until it is implemented 
     # in the coralogixLogger class
     while True:   
