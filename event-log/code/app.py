@@ -6,9 +6,10 @@ import urllib.error as urlerror
 import urllib.parse as urlparse
 import json, csv
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import ciso8601
 from coralogix.handlers import CoralogixLogger
+from coralogix import manager
 import boto3
 
 # Create internal logger and logs logger.
@@ -17,6 +18,7 @@ internal_logger.setLevel(logging.INFO)
 external_logger = logging.getLogger('External Logger')
 external_logger.setLevel(logging.INFO)
 external_logger.propagate = False
+
 # Define environment variables
 PRIVATE_KEY = os.getenv('CORALOGIX_PRIVATE_KEY')
 APP_NAME = os.getenv('CORALOGIX_APPLICATION_NAME')
@@ -36,7 +38,6 @@ ALLOWED_EVENT_TYPE = ['API', 'ApexCallout', 'ApexExecution', 'AsyncReportRun', '
   'MetadataApiOperation', 'NamedCredential', 'OneCommerceUsage', 'PackageInstall', 'QueuedExecution', 'PlatformEncryption', 'Report', 'RestApi', 'Sites', 'SearchClick', 'Search', 'TimeBasedWorkflow', 'URI', 'VisualforceRequest', 'WaveChange', 'WaveInteraction', 'WavePerformance']
 def lambda_handler(event, context):
     internal_logger.info('Event-log puller lambda - init')
-    timestart = datetime.now(timezone.utc).isoformat().replace('+00:00', 'z')
     # Coralogix variables check
     if PRIVATE_KEY == '':
         internal_logger.error('Event-log puller lambda Failure - coralogix private key not found')
@@ -116,7 +117,12 @@ def lambda_handler(event, context):
     if 'Items' in db_response and len(db_response['Items']) > 0:
         last_update = [x for x in db_response['Items'] if x['id'] == '0'][0]['lastUpdated']
     else:
-        last_update = timestart
+        # now - 2 days because it can take 24H+ for event-log files to be generated on Salesforce side
+        last_update = (datetime.now(timezone.utc).date() - timedelta(days=2)).isoformat() + "T00:00:00.000000z"
+        db_table.put_item(Item={
+                    'id': 0,
+                    'lastUpdated': last_update
+        })
     # build SF domain
     if SANDBOX_ENV in TRUE_VALUES:
         domain = '%s.sandbox.my.salesforce.com' % HOST
@@ -132,25 +138,7 @@ def lambda_handler(event, context):
         }
     # setup lambda timout flag
     early_end = False
-    if len(records) == 0:
-        # no records from SF, modify last update to timestart.
-        db_table.put_item(Item={
-        'id': '0',
-        'lastUpdated': timestart
-        })
-        new_last_update = ciso8601.parse_datetime(timestart)
-        # check if any records needs to be deleted
-        items_to_delete = []
-        for record in db_response['Items']:
-            if record['id'] != '0':
-                if ciso8601.parse_datetime(record['lastUpdated']) < new_last_update:
-                    items_to_delete.append(record['id'])
-        with db_table.batch_writer() as batch:
-            for item in items_to_delete:
-                batch.delete_item(Key={
-                    'id': item
-                })
-    else:
+    if len(records) > 0:
         # setup early_end record index
         early_last_record = len(records) - 1
         items_to_add = []
@@ -165,20 +153,18 @@ def lambda_handler(event, context):
                 early_last_record = i
                 early_end = True
                 break
-        if early_end == True:
-            last_record = records[early_last_record]
-            new_last_update = ciso8601.parse_datetime(last_record['LogDate'])
-            items_to_add.append({'Id': '0','LogDate': new_last_update.isoformat().replace('+0000','z')})
-        else:
-            new_last_update = ciso8601.parse_datetime(timestart)
-            items_to_add.append({'Id':'0','LogDate':timestart})
-        # save to db all records
+        last_record = records[early_last_record]
+        new_last_update = ciso8601.parse_datetime(last_record['LogDate'])
+        # generate an item to update the 'lastUpdate' of id 0
+        items_to_add.append({'Id': '0','LogDate': new_last_update.isoformat().replace('+00:00','z')})
         with db_table.batch_writer() as batch:
             for item in items_to_add:
-                batch.put_item(Item={
-                    'id': item['Id'],
-                    'lastUpdated': item['LogDate'].replace('+0000','z') # replace will only catch 'real' record logDate
-                })
+                # save to db only records that LogDate is equal to lastUpdate
+                if ciso8601.parse_datetime(record['LogDate']) == new_last_update:
+                    batch.put_item(Item={
+                        'id': item['Id'],
+                        'lastUpdated': item['LogDate'].replace('+0000','z')
+                    })
         # check if any records needs to be deleted
         items_to_delete = []
         for record in db_response['Items']:
@@ -190,9 +176,14 @@ def lambda_handler(event, context):
                 batch.delete_item(Key={
                     "id": item
                 })
-
     CoralogixLogger.flush_messages()
-    time.sleep(5) # for now until fixing python sdk not fully flushing within aws lambda
+    # exit only on coralogix logger buffer empty
+    # code implementation until it is implemented 
+    # in the coralogixLogger class
+    while True:   
+        if manager.LoggerManager._buffer_size == 0:
+            break
+        time.sleep(1)
     if early_end: # if the lambda had to stop before finishing due to time-out
         internal_logger.info("Event-log puller lambda - Not enough time to send all logs, waiting for next invocation")
         return {
@@ -202,11 +193,11 @@ def lambda_handler(event, context):
         }),
         }
     else:
-        internal_logger.info('Event-log puller lambda Success - logs sent to coralogix')
+        internal_logger.info('Event-log puller lambda Success')
         return {
         'statusCode': 200,
         'body': json.dumps({
-        'message': 'Event-log puller lambda Success - logs sent to coralogix',
+        'message': 'Event-log puller lambda Success',
         }),
         }
 
@@ -226,6 +217,9 @@ def get_records_list(access_token, domain, last_update):
         return None
     except urlerror.URLError as e:
         internal_logger.error('Event-log puller lambda Failure could not retrieve records - Endpoint: %s , error: %s' % (HOST, e))
+        return None
+    except TimeoutError as e:
+        internal_logger.error('Event-log puller lambda Failure could not retrieve records - Timeout error - Endpoint: %s , error: %s' % (HOST, e))
         return None
     res_body = response.read()
     try:
@@ -250,6 +244,8 @@ def record_logic(access_token, domain, record):
     except urlerror.URLError as e:
         internal_logger.error('Event-log puller lambda Failure could not retrieve logfile - recordId: %s,  Endpoint: %s , error: %s' % (record['Id'], domain, e))
         return None
+    except TimeoutError as e:
+        internal_logger.error('Event-log puller lambda Failure could not retrieve logfile - Timeout error - recordId: %s,  Endpoint: %s , error: %s' % (record['Id'], domain, e))
     res_body = response.read()
     try:
         csvReader = csv.DictReader(io.StringIO(res_body.decode('utf-8')))
@@ -296,6 +292,14 @@ def get_token():
             'message': 'Event-log puller lambda Failure - Error while getting token, Error: %s' % e,
         }),
         }
+    except TimeoutError as e:
+        internal_logger.error('Event-log puller lambda Failure - Error while getting token - Timeout error, Error: %s' % e)
+        return {
+           'statusCode': 400,
+            'body': json.dumps({
+            'message': 'Event-log puller lambda Failure - Error while getting token - Timeout error, Error: %s' % e,
+        }),
+        }
     res_body = response.read()
     try:
         JSON_object = json.loads(res_body.decode('utf-8'))
@@ -309,4 +313,3 @@ def get_token():
             'message': 'Event-log puller lambda Failure - Error while getting token, failed to get access_token from request - %s ' % json.dumps(JSON_object),
         }),
         }
-        
