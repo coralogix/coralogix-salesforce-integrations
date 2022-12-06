@@ -6,7 +6,7 @@ Metadata:
   AWS::ServerlessRepo::Application:
     Name: Coralogix-event-log
     Description: Get logs from Salesforce event-log and send them to Coralogix.
-    Author: Coralogix-test
+    Author: Coralogix
     SpdxLicenseId: Apache-2.0
     LicenseUrl: ../LICENSE
     ReadmeUrl: README.md
@@ -114,14 +114,14 @@ Parameters:
     MaxLength: 64
   SFSandbox:
     Type: String
-    Description: True or False if the this is a sandbox environment
+    Description: True or False if this is a sandbox environment
     AllowedValues:
       - "True"
       - "False"
     Default: "False"
   SFHost:
     Type: String
-    Description: The SF host only without .my.salesforce.com; <SF-HOST>.my.salesforce.com
+    Description: The SF host only, without '.my.salesforce.com'; <SF-HOST>.my.salesforce.com
     NoEcho: true
   SFEventType:
     Type: String
