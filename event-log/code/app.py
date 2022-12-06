@@ -120,7 +120,7 @@ def lambda_handler(event, context):
         # now - 2 days because it can take 24H+ for event-log files to be generated on Salesforce side
         last_update = (datetime.now(timezone.utc).date() - timedelta(days=2)).isoformat() + "T00:00:00.000000z"
         db_table.put_item(Item={
-                    'id': 0,
+                    'id': '0',
                     'lastUpdated': last_update
         })
     # build SF domain
@@ -160,7 +160,7 @@ def lambda_handler(event, context):
         with db_table.batch_writer() as batch:
             for item in items_to_add:
                 # save to db only records that LogDate is equal to lastUpdate
-                if ciso8601.parse_datetime(record['LogDate']) == new_last_update:
+                if ciso8601.parse_datetime(item['LogDate']) == new_last_update:
                     batch.put_item(Item={
                         'id': item['Id'],
                         'lastUpdated': item['LogDate'].replace('+0000','z')
